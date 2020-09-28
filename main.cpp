@@ -14,6 +14,11 @@
 static int serialPort;
 
 int serial_wrapper(unsigned char *data, int len) {
+    for (int inx = 0; inx < len; inx++) {
+        std::cout << std::hex << (int)data[inx];
+        std::cout << " ";
+    }
+    std::cout << "\n\n";
     return write(serialPort, data, len);
 }
 
