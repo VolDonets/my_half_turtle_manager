@@ -15,7 +15,8 @@ add_executable(my_half_turtle_manager main.cpp
 
         bipropellant-api/hbprotocol/protocol.c
         bipropellant-api/hbprotocol/machine_protocol.c
-        bipropellant-api/hbprotocol/cobsr.h
-        bipropellant-api/hbprotocol/cobsr.c
+#        bipropellant-api/hbprotocol/cobsr.c
+#        bipropellant-api/hbprotocol/cobsr.h
+        bipropellant-api/hbprotocol/ascii_protocol.h
         bipropellant-api/hbprotocol/ascii_protocol.c
         )

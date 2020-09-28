@@ -25,7 +25,6 @@
 */
 
 #include "protocol_private.h"
-#include "cobsr.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -44,11 +43,10 @@ static void mpPutTx(MACHINE_PROTOCOL_TX_BUFFER *buf, unsigned char value);
 
 
 #define PROTOCOL_STATE_IDLE 0
-#define PROTOCOL_STATE_WAIT_CMD 1
+#define PROTOCOL_STATE_WAIT_LEN 1
 #define PROTOCOL_STATE_WAIT_CI 2
-#define PROTOCOL_STATE_WAIT_LEN 3
-#define PROTOCOL_STATE_WAIT_END 4
-#define PROTOCOL_STATE_BADCHAR 5
+#define PROTOCOL_STATE_WAIT_END 3
+#define PROTOCOL_STATE_BADCHAR 4
 
 #define PROTOCOL_ACK_TX_IDLE 0
 #define PROTOCOL_ACK_TX_WAITING 1
@@ -58,161 +56,62 @@ static void mpPutTx(MACHINE_PROTOCOL_TX_BUFFER *buf, unsigned char value);
 // private to us
 static void protocol_send_nack(int (*send_serial_data)( unsigned char *data, int len ), unsigned char CI, unsigned char som);
 static void protocol_send_ack(int (*send_serial_data)( unsigned char *data, int len ), unsigned char CI);
-static int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg);
-static int protocol_send_raw(int (*send_serial_data)( unsigned char *data, int len ), PROTOCOL_MSG3full *msgFull);
+static int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG2 *msg);
+static void protocol_send_raw(int (*send_serial_data)( unsigned char *data, int len ), PROTOCOL_MSG2 *msg);
 
-
-int protocol_cobsr_decode(PROTOCOL_MSG3 *msg)
-{
-    cobsr_decode_result result = cobsr_decode(msg->bytes, (size_t)msg->len, msg->bytes, (size_t)msg->len);
-
-    if(result.out_len == 1) // Minimum CS
-    {
-        msg->len = 0;                  // No Code, no Payload
-        msg->bytes[1] = msg->bytes[0]; // Copy Checksum one byte further to create space for 'code'
-        msg->bytes[0] = 0;             // Set 'code' which was optional to 0
-    }
-    else if(result.out_len >= 2) // CS and Code and optional payload
-    {
-        msg->len = (unsigned char) result.out_len - sizeof(unsigned char) - sizeof(unsigned char); // Do not count CS and code
-    }
-    else
-    {
-        return -1; // Message too short, invalid.
-    }
-    return (int) result.status;
-}
-
-int protocol_cobsr_encode(PROTOCOL_MSG3 *msg)
-{
-    // COBSR encoding can result in a length which is 1 byte longer. Enough Memory has to be provided.
-    cobsr_encode_result result = cobsr_encode(msg->bytes, (size_t)msg->len + 1, msg->bytes, (size_t)msg->len);
-
-    if(result.out_len >= 1) // At least CS
-    {
-        msg->len = (unsigned char) result.out_len;
-    }
-    else
-    {
-        return -1; // Message too short, invalid.
-    }
-    return (int) result.status;
-}
-
-void protocol_SOM_decode(PROTOCOL_MSG3 *msg) {
-
-    if(0b10000000 & msg->cmd) {
-        msg->SOM = PROTOCOL_SOM_ACK;
-    } else {
-        msg->SOM = PROTOCOL_SOM_NOACK;
-    }
-
-    msg->cmd = 0b01111111 & msg->cmd;
-}
-
-int protocol_SOM_encode(PROTOCOL_MSG3 *msg) {
-
-    if( msg->SOM == PROTOCOL_SOM_ACK ) {
-        msg->cmd = msg->cmd | 0b10000000;
-        msg->SOM = PROTOCOL_SOM;
-        return 0; // all went well
-
-    } else  if( msg->SOM == PROTOCOL_SOM_NOACK ) {
-        msg->cmd = msg->cmd & 0b01111111;
-        msg->SOM = PROTOCOL_SOM;
-        return 0; // all went well
-    }
-
-    return 1; // Unknowm SOM
-
-}
 
 // called from main.c
 // externed in protocol.h
 void protocol_byte(PROTOCOL_STAT *s, unsigned char byte ){
 
-    s->last_char_time = protocol_GetTick();
-
-
-    if (byte == PROTOCOL_SOM) {
-        // PROTOCOL_SOM indicates a new protocol Message.
-        switch(s->state) {
-            case PROTOCOL_STATE_IDLE:
-                // Everything as planned, start new Message.
-                break;
-            case PROTOCOL_STATE_WAIT_CMD:
-            case PROTOCOL_STATE_WAIT_CI:
-                // Not idle, no new CI received yet. Send NACK with incremented CI.
-                protocol_send_nack(s->send_serial_data, s->curr_msg.CI+1, s->curr_msg.SOM);
-                break;
-            default:
-                // all other cases, send NACK for current CI. Even though we no it might be wrong..
-                protocol_send_nack(s->send_serial_data, s->curr_msg.CI, s->curr_msg.SOM);
-                break;
-        }
-        s->curr_msg.SOM = byte;
-        s->CS = 0;
-        s->state = PROTOCOL_STATE_WAIT_CMD;
-        return; // leave function.
-    }
-
     switch(s->state){
     case PROTOCOL_STATE_BADCHAR:
     case PROTOCOL_STATE_IDLE:
-        if (s->allow_ascii){
-            //////////////////////////////////////////////////////
-            // if the byte was NOT SOM (02), then treat it as an
-            // ascii protocol byte.  BOTH protocol can co-exist
-            s->last_char_time = 0;
-            ascii_byte(s, byte );
-            //////////////////////////////////////////////////////
+        if ((byte == PROTOCOL_SOM_ACK) || (byte == PROTOCOL_SOM_NOACK)){
+            s->curr_msg.SOM = byte;
+            s->last_char_time = protocol_GetTick();
+            s->state = PROTOCOL_STATE_WAIT_CI;
+            s->CS = 0;
         } else {
-            s->state = PROTOCOL_STATE_BADCHAR;
+            if (s->allow_ascii){
+                //////////////////////////////////////////////////////
+                // if the byte was NOT SOM (02), then treat it as an
+                // ascii protocol byte.  BOTH protocol can co-exist
+                ascii_byte(s, byte );
+                //////////////////////////////////////////////////////
+            } else {
+                s->last_char_time = protocol_GetTick();
+                s->state = PROTOCOL_STATE_BADCHAR;
+            }
         }
         break;
 
-    case PROTOCOL_STATE_WAIT_CMD:
-        s->curr_msg.cmd = byte;
-        s->state = PROTOCOL_STATE_WAIT_CI;
-        break;
-
     case PROTOCOL_STATE_WAIT_CI:
+        s->last_char_time = protocol_GetTick();
         s->curr_msg.CI = byte;
+        s->CS += byte;
         s->state = PROTOCOL_STATE_WAIT_LEN;
         break;
 
     case PROTOCOL_STATE_WAIT_LEN:
+        s->last_char_time = protocol_GetTick();
         s->curr_msg.len = byte;
         s->count = 0;
+        s->CS += byte;
         s->state = PROTOCOL_STATE_WAIT_END;
         break;
 
     case PROTOCOL_STATE_WAIT_END:
+        s->last_char_time = protocol_GetTick();
         s->curr_msg.bytes[s->count++] = byte;
+        s->CS += byte;
 
-        if (s->count == s->curr_msg.len){
+        if (s->count == s->curr_msg.len+1){
             s->last_char_time = 0;
-            s->state = PROTOCOL_STATE_IDLE;
-
-
-            // Decode COBS/R
-            if(protocol_cobsr_decode(&s->curr_msg) != 0) {
-                protocol_send_nack(s->send_serial_data, s->curr_msg.CI, s->curr_msg.SOM);
-            }
-
-            // Verify Checksum
-            s->CS = s->curr_msg.SOM + s->curr_msg.cmd + s->curr_msg.CI + s->curr_msg.len;
-
-            for (int i = 0; i < s->curr_msg.len + 2; i++) { // Include 'code' and CS in calculation
-                s->CS += s->curr_msg.bytes[i];
-            }
-
-            // Decode SOM
-            protocol_SOM_decode(&s->curr_msg);
 
             switch(s->curr_msg.SOM) {
             case PROTOCOL_SOM_ACK:
-                switch(s->curr_msg.cmd) {
+                switch(s->curr_msg.bytes[0]) {
                 case PROTOCOL_CMD_ACK:
                     if (s->send_state == PROTOCOL_ACK_TX_WAITING){
                         if (s->curr_msg.CI == s->ack.curr_send_msg.CI){
@@ -286,13 +185,13 @@ void protocol_byte(PROTOCOL_STAT *s, unsigned char byte ){
                     protocol_send_ack(s->send_serial_data, s->curr_msg.CI);
                     s->ack.lastRXCI = s->curr_msg.CI;
                     s->ack.counters.rx++;
-                    protocol_process_message(s, (PROTOCOL_MSG3full *)&(s->curr_msg));
+                    protocol_process_message(s, &(s->curr_msg));
                     break;
                 }
                 break;
 
             case PROTOCOL_SOM_NOACK:
-                switch(s->curr_msg.cmd) {
+                switch(s->curr_msg.bytes[0]) {
                 case PROTOCOL_CMD_ACK:
                     // We shouldn't get ACKs in the NoACK protocol..
                     s->noack.counters.unwantedacks++;
@@ -337,7 +236,7 @@ void protocol_byte(PROTOCOL_STAT *s, unsigned char byte ){
                     // process message
                     s->noack.lastRXCI = s->curr_msg.CI;
                     s->noack.counters.rx++;
-                    protocol_process_message(s, (PROTOCOL_MSG3full *)&(s->curr_msg));
+                    protocol_process_message(s, &(s->curr_msg));
                     break;
                 }
                 break;
@@ -360,17 +259,14 @@ void protocol_send_nack(int (*send_serial_data)( unsigned char *data, int len ),
         som = PROTOCOL_SOM_ACK;
     }
 
-    // Enforce valid CI
-    if(CI == 0) CI = 1;
-
-    char tmp[] = { som, PROTOCOL_CMD_NACK, CI, 0, 0, 0, 0}; // Length 0, Memory for code, CS and stuffing byte
-    protocol_send_raw(send_serial_data, (PROTOCOL_MSG3full *)tmp);
+    char tmp[] = { som, CI, 1, PROTOCOL_CMD_NACK, 0 };
+    protocol_send_raw(send_serial_data, (PROTOCOL_MSG2 *)tmp);
 }
 
 // private
 void protocol_send_ack(int (*send_serial_data)( unsigned char *data, int len ), unsigned char CI){
-    char tmp[] = { PROTOCOL_SOM_ACK, PROTOCOL_CMD_ACK, CI, 0, 0, 0, 0}; // Length 0, Memory for code, CS and stuffing byte
-    protocol_send_raw(send_serial_data, (PROTOCOL_MSG3full *)tmp);
+    char tmp[] = { PROTOCOL_SOM_ACK, CI, 1, PROTOCOL_CMD_ACK, 0 };
+    protocol_send_raw(send_serial_data, (PROTOCOL_MSG2 *)tmp);
 }
 
 
@@ -380,7 +276,8 @@ void protocol_send_ack(int (*send_serial_data)( unsigned char *data, int len ), 
 //  -1 - cannot even queue
 //  0 sent immediately
 //  1 queued for later TX
-int protocol_post(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
+int protocol_post(PROTOCOL_STAT *s, PROTOCOL_MSG2 *msg){
+
 
     if(msg->SOM == PROTOCOL_SOM_ACK) {
         int txcount = mpTxQueued(&s->ack.TxBuffer);
@@ -390,21 +287,21 @@ int protocol_post(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
         }
 
         // add to tx queue
-        int total = msg->lenPayload + 4; // cmd, CI, len, code + size of content
+        int total = msg->len + 1; // +1 len
 
         if (txcount + total >= MACHINE_PROTOCOL_TX_BUFFER_SIZE-2) {
             s->ack.TxBuffer.overflow++;
             return -1;
         }
 
-        char *src = (char *) &(msg->cmd); // Do not copy SOM
+        char *src = (char *) &(msg->len);
         for (int i = 0; i < total; i++) {
             mpPutTx(&s->ack.TxBuffer, *(src++));
         }
 
         return 1; // added to queue
 
-    } else if(msg->SOM == PROTOCOL_SOM_NOACK) { // Do not buffer NOACK Messages.
+    } else if(msg->SOM == PROTOCOL_SOM_NOACK) {
         return protocol_send(s, msg);
     }
     return -1;
@@ -413,7 +310,7 @@ int protocol_post(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
 
 // private
 // note: if NULL in, send one message from queue
-int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
+int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG2 *msg){
     if(msg) {
         if(msg->SOM == PROTOCOL_SOM_ACK && s->send_state == PROTOCOL_ACK_TX_WAITING) {
             // Tried to Send Message which requires ACK, but a message is still pending.
@@ -421,9 +318,8 @@ int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
 
         } else if(msg->SOM == PROTOCOL_SOM_ACK && s->send_state == PROTOCOL_ACK_TX_IDLE) {
             // Idling (not waiting for ACK), send the Message directly
-            memcpy(&s->ack.curr_send_msg, msg, 5 + msg->lenPayload); // SOM, cmd, CI, len, code + size of content
-            if( !(++(s->ack.lastTXCI)) ) s->ack.lastTXCI = 1;        // 0 is not a valid CI
-            s->ack.curr_send_msg.CI = s->ack.lastTXCI;
+            memcpy(&s->ack.curr_send_msg, msg, 1 + 1 + 1 + msg->len); // SOM + CI + Len + Payload
+            s->ack.curr_send_msg.CI = ++(s->ack.lastTXCI);
             s->ack.counters.tx++;
             protocol_send_raw(s->send_serial_data, &s->ack.curr_send_msg);
             s->send_state = PROTOCOL_ACK_TX_WAITING;
@@ -433,9 +329,8 @@ int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
 
         } else if (msg->SOM == PROTOCOL_SOM_NOACK) {
             // Send Message without ACK immediately
-            memcpy(&s->noack.curr_send_msg, msg, 5 + msg->lenPayload); // SOM, cmd, CI, len, code + size of content
-            if( !(++(s->noack.lastTXCI)) ) s->noack.lastTXCI = 1;        // 0 is not a valid CI
-            s->noack.curr_send_msg.CI = s->noack.lastTXCI;
+            memcpy(&s->noack.curr_send_msg, msg, 1 + 1 + 1 + msg->len); // SOM + CI + Len + Payload
+            s->noack.curr_send_msg.CI = ++(s->noack.lastTXCI);
             s->noack.counters.tx++;
             protocol_send_raw(s->send_serial_data, &s->noack.curr_send_msg);
             return 0;
@@ -449,10 +344,9 @@ int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
 
         if(s->send_state == PROTOCOL_STATE_IDLE && mpTxQueued(&s->ack.TxBuffer)) {
             // Make sure we are not waiting for another ACK. Check if There is something in the buffer.
-            mpGetTxMsg(&s->ack.TxBuffer, &s->ack.curr_send_msg.cmd);
+            mpGetTxMsg(&s->ack.TxBuffer, &s->ack.curr_send_msg.len);
             s->ack.curr_send_msg.SOM = PROTOCOL_SOM_ACK;
-            if( !(++(s->ack.lastTXCI)) ) s->ack.lastTXCI = 1;        // 0 is not a valid CI
-            s->ack.curr_send_msg.CI = s->ack.lastTXCI;
+            s->ack.curr_send_msg.CI = ++(s->ack.lastTXCI);
             s->ack.counters.tx++;
             protocol_send_raw(s->send_serial_data, &s->ack.curr_send_msg);
             s->send_state = PROTOCOL_ACK_TX_WAITING;
@@ -462,12 +356,11 @@ int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
 
         } else {
             // Do the other queue
-            int ismsg = mpGetTxMsg(&s->noack.TxBuffer, &s->noack.curr_send_msg.cmd);
+            int ismsg = mpGetTxMsg(&s->noack.TxBuffer, &s->noack.curr_send_msg.len);
             if (ismsg){
                 // Queue has message waiting
                 s->noack.curr_send_msg.SOM = PROTOCOL_SOM_NOACK;
-                if( !(++(s->noack.lastTXCI)) ) s->noack.lastTXCI = 1;        // 0 is not a valid CI
-                s->noack.curr_send_msg.CI = s->noack.lastTXCI;
+                s->noack.curr_send_msg.CI = ++(s->noack.lastTXCI);
                 s->noack.counters.tx++;
                 protocol_send_raw(s->send_serial_data, &s->noack.curr_send_msg);
                 return 0;
@@ -479,58 +372,23 @@ int protocol_send(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg){
 
 
 // private
-static int protocol_send_raw(int (*send_serial_data)( unsigned char *data, int len ), PROTOCOL_MSG3full *msgFull){
+void protocol_send_raw(int (*send_serial_data)( unsigned char *data, int len ), PROTOCOL_MSG2 *msg){
 
-    PROTOCOL_MSG3 *msg = (PROTOCOL_MSG3 *) msgFull;
-
-
-    // Check if Messages is already encoded or not (Resends are already encoded.)
-    if( msgFull->SOM != PROTOCOL_SOM) {
-    // Encode SOM
-    if( protocol_SOM_encode(msg) != 0) return 1;
-
-        // Calculate Checksum
-        unsigned char CS = -msgFull->SOM -msgFull->cmd -msgFull->CI - msgFull->lenPayload;
-
-        if( msgFull->code != 0) msg->len += 1; // Include code.
-
+    // Enforce validity of SOM.
+    if(msg->SOM == PROTOCOL_SOM_ACK || msg->SOM == PROTOCOL_SOM_NOACK) {
+    unsigned char CS = 0;
     int i;
-        for (i = 0; i < msg->len; i++) {
+    CS -= msg->CI;
+    CS -= msg->len;
+
+    for (i = 0; i < msg->len; i++){
         CS -= msg->bytes[i];
     }
     msg->bytes[i] = CS;
-        msg->len += 1; // Include CS.
-
-    // Encode COBS/R
-        if(protocol_cobsr_encode(msg) != 0) return 2; // failed
-    }
-
-    // Send
-    send_serial_data((unsigned char *) msg, msg->len+4); // len + size of SOM, cmd, CI & len
-    return 0; // Successful
+    send_serial_data((unsigned char *) msg, msg->len+4);
+}
 }
 
-int protocol_send_text(PROTOCOL_STAT *s, char *message, unsigned char som) {
-
-
-    if( (s->params[0x26]) && (strlen(message) <= s->params[0x26]->len ) ) {
-
-        PROTOCOL_MSG3full newMsg;
-        memset((void*)&newMsg,0x00,sizeof(PROTOCOL_MSG3full));
-
-        newMsg.SOM = som;
-        newMsg.lenPayload = strlen(message) + 1;  // +1 for Null character \0
-
-        newMsg.cmd = PROTOCOL_CMD_WRITEVAL;
-        newMsg.code = 0x26;                    // 0x26 for text
-        strcpy( (char *) newMsg.content, message);
-
-        protocol_post(s, &newMsg);
-
-        return strlen(message);
-    }
-    return -1; // failed
-}
 
 // called regularly from main.c
 // externed from protocol.h
@@ -596,12 +454,14 @@ void protocol_tick(PROTOCOL_STAT *s){
 
                 //If so, pretend that a Read request has arrived.
 
-                PROTOCOL_MSG3full newMsg;
-                memset((void*)&newMsg,0x00,sizeof(PROTOCOL_MSG3full));
+                PROTOCOL_MSG2 newMsg;
+                memset((void*)&newMsg,0x00,sizeof(PROTOCOL_MSG2));
+                PROTOCOL_BYTES_READVALS *readvals = (PROTOCOL_BYTES_READVALS *) &(newMsg.bytes);
 
-                newMsg.cmd  = PROTOCOL_CMD_READVAL;
-                newMsg.code = s->subscriptions[index].code;
+                readvals->cmd  = PROTOCOL_CMD_READVAL;
+                readvals->code = s->subscriptions[index].code;
                 newMsg.SOM = s->subscriptions[index].som;
+                newMsg.len = sizeof(readvals->cmd) + sizeof(readvals->code) + 1; // 1 for Checksum
 
                 protocol_process_message(s, &newMsg);
 
@@ -643,11 +503,7 @@ unsigned char mpGetTxByte(MACHINE_PROTOCOL_TX_BUFFER *buf){
 
 char mpGetTxMsg(MACHINE_PROTOCOL_TX_BUFFER *buf, unsigned char *dest){
     if (mpTxQueued(buf)) {
-        *(dest++) = mpGetTxByte(buf); // cmd
-        *(dest++) = mpGetTxByte(buf); // CI, technically not needed..
-        unsigned char len = *(dest++) = mpGetTxByte(buf); // length of payload
-        *(dest++) = mpGetTxByte(buf); // code
-
+        unsigned char len = *(dest++) = mpGetTxByte(buf); // len of bytes to follow
         for (int i = 0; i < len; i++) {
             *(dest++) = mpGetTxByte(buf); // data
         }

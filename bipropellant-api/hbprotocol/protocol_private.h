@@ -16,10 +16,7 @@
 * You should have received a copy of the GNU General Public License
 * along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-
-// Define to prevent recursive inclusion
-#ifndef PROTOCOL_PRIVATE_H
-#define PROTOCOL_PRIVATE_H
+#pragma once
 
 #include <stdint.h>
 #include "protocol.h"
@@ -39,6 +36,42 @@ extern "C" {
 /////////////////////////////////////////////////////////////////
 
 
+#pragma pack(push, 1)
+typedef struct tag_PROTOCOL_LEN_ONWARDS {
+    unsigned char len; // len is len of ALL bytes to follow, including CS
+    unsigned char bytes[sizeof( ((PROTOCOL_MSG2 *)0)->bytes )];  // variable number of data bytes, with a checksum on the end, cmd is first
+} PROTOCOL_LEN_ONWARDS;
+#pragma pack(pop)
+
+// content of 'bytes' above, for single byte commands
+#pragma pack(push, 1)
+typedef struct tag_PROTOCOL_BYTES {
+    unsigned char cmd; //
+    unsigned char bytes[sizeof( ((PROTOCOL_MSG2 *)0)->bytes ) - sizeof(unsigned char)]; // cmd is part of bytes and needs to be substracted
+} PROTOCOL_BYTES;
+#pragma pack(pop)
+
+
+
+// content of 'bytes' above, for single byte commands
+#pragma pack(push, 1)
+typedef struct tag_PROTOCOL_BYTES_READVALS {
+    unsigned char cmd; // 'R'
+    unsigned char code; // code of value to read
+} PROTOCOL_BYTES_READVALS;
+#pragma pack(pop)
+
+
+#pragma pack(push, 1)
+typedef struct tag_PROTOCOL_BYTES_WRITEVALS {
+    unsigned char cmd; // 'W'
+    unsigned char code; // code of value to write
+    unsigned char content[sizeof( ((PROTOCOL_MSG2 *)0)->bytes ) - sizeof(unsigned char) - sizeof(unsigned char)]; // cmd and code are part of bytes and need to be substracted
+} PROTOCOL_BYTES_WRITEVALS;
+#pragma pack(pop)
+
+
+
 
 
 /////////////////////////////////////////////////////////////////
@@ -47,7 +80,7 @@ void ascii_byte(PROTOCOL_STAT *s, unsigned char byte );
 
 /////////////////////////////////////////////////////////////////
 // processes machine protocol messages
-void protocol_process_message(PROTOCOL_STAT *s, PROTOCOL_MSG3full *msg);
+void protocol_process_message(PROTOCOL_STAT *s, PROTOCOL_MSG2 *msg);
 
 /////////////////////////////////////////////////////////////////
 // get buffer level
@@ -58,11 +91,9 @@ int mpTxQueued(MACHINE_PROTOCOL_TX_BUFFER *buf);
 extern void (*debugprint)(const char str[]);
 
 // get param function handler
-PARAMSTAT_FN getParamHandler( PROTOCOL_STAT *s, unsigned char code );
+PARAMSTAT_FN getParamHandler(unsigned char code);
 
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif
