@@ -4,6 +4,7 @@
 #include <errno.h>      // error integer and strerror() function
 #include <termios.h>    // contains POSIX terminal control definitions
 #include <unistd.h>     // write(), read(), close()
+#include <memory>
 
 
 #include "bipropellant-api/HoverboardAPI.h"
@@ -14,16 +15,16 @@
 static int serialPort;
 
 int serial_wrapper(unsigned char *data, int len) {
-    for (int inx = 0; inx < len; inx++) {
-        std::cout << (int)data[inx];
-        std::cout << " ";
-    }
-    std::cout << "\n\n" << len << " <- L\n";
+//    for (int inx = 0; inx < len; inx++) {
+//        std::cout << (int) data[inx];
+//        std::cout << " ";
+//    }
+//    std::cout << "\n\n" << len << " <- L\n";
     return write(serialPort, data, len);
 }
 
 int main() {
-    serialPort = open(DRIVE_FILE_PATH, O_RDWR );
+    serialPort = open(DRIVE_FILE_PATH, O_RDWR);
     //serialPort = open(DRIVE_FILE_PATH, O_RDWR | O_NOCTTY | O_NDELAY);
     //fcntl(serialPort, F_SETFL, 0);
 
@@ -72,7 +73,8 @@ int main() {
     tty.c_lflag &= ~ISIG;       // disable interpretation of INTR, QUIN and SUSP
 
     tty.c_iflag &= ~(IXON | IXOFF | IXANY); // Turn off s/w flow ctrl
-    tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL); // Disable any special handling of received bytes
+    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR |
+                     ICRNL); // Disable any special handling of received bytes
 
 
 //     there is a configuration of OUTPUT MODES (c_oflag)
@@ -87,42 +89,84 @@ int main() {
     cfsetispeed(&tty, B115200);
     cfsetospeed(&tty, B115200);
 //     saving termios
-    if (tcsetattr(serialPort, TCSANOW, &tty) != 0){
+    if (tcsetattr(serialPort, TCSANOW, &tty) != 0) {
         std::cout << "CONFIGURE ERROR 2\n";
         return 2;
     }
 
-    HoverboardAPI hoverboardApi = HoverboardAPI(serial_wrapper);
-//    HoverboardAPI *hoverboardApi = new HoverboardAPI(serial_wrapper);
-//    hoverboardApi.printStats();
-//    std::cout << hoverboardApi.protocolCountACK << "\n";
-//    hoverboardApi.protocolPush(36);
-//    hoverboardApi.protocolTick();
 
-   // hoverboardApi->scheduleRead(HoverboardAPI::Codes::sensHall, -1, 20, PROTOCOL_SOM_NOACK);
-   // hoverboardApi->scheduleRead(HoverboardAPI::Codes::sensElectrical, -1, 20, PROTOCOL_SOM_NOACK);
+    std::shared_ptr<HoverboardAPI> hoverboardApi = std::make_shared<HoverboardAPI>(serial_wrapper);
+
 
     int inx = 0;
+    int power = 0;
 
-    while (inx < 1000) {
-        hoverboardApi.sendPWM(150, 0, PROTOCOL_SOM_NOACK);  //40pwm is the minimum power value
-//        hoverboardApi->protocolTick();
+    std::cout << "Set 0 state for the iron turtle controller\n";
+   // hoverboardApi->sendPIDControl(50, 20, 10, 30, PROTOCOL_SOM_NOACK);
+    usleep(1000 * 3000);
+    std::cout << "DONE: Set 0 state for the iron turtle controller\n";
+    inx = 0;
 
-        //hoverboardApi->requestRead(HoverboardAPI::Codes::sensHall, PROTOCOL_SOM_NOACK);
+    double current_speed = 0;
 
-//        hoverboardApi->protocolTick();
-        //std::cout << "Speed: " << hoverboardApi->getSpeed0_mms() << " m/s\n";
-       // hoverboardApi.sendSpeedData(0.3, 0.2, 300, 5, PROTOCOL_SOM_NOACK);
-        //write(serialPort, aaa, 26);
-        //hoverboardApi.seS
-        //hoverboardApi.sendBuzzer();
-       // std::cout << "Voltage: " <<  hoverboardApi->getBatteryVoltage() << "\n";
-
-       // hoverboardApi->protocolTick();
+    while (inx < 50) {
+        hoverboardApi->sendSpeedData(0.0, current_speed, power, 5, PROTOCOL_SOM_NOACK);
+        current_speed = (current_speed < 0.05) ? (current_speed + 0.001) : 0.05;
         usleep(1000 * 30);
         inx++;
-//        std::cout << inx << "\n";
     }
+    inx = 0;
+    while (inx < 200) {
+        hoverboardApi->sendSpeedData(0.0, 0.05, power, 5, PROTOCOL_SOM_NOACK);
+        power = (power < 200) ? (power + 50) : 200;
+        usleep(1000 * 30);
+        inx++;
+    }
+
+    std::cout << "step 1 passed\n";
+
+    inx = 0;
+    current_speed = 0.05;
+    while (inx < 50) {
+        hoverboardApi->sendSpeedData(0.0, current_speed, power, 5, PROTOCOL_SOM_NOACK);
+        current_speed = (current_speed > 0) ? (current_speed - 0.001) : 0;
+        usleep(1000 * 30);
+        inx++;
+    }
+
+// // // // // // // // // // //
+
+    inx = 0;
+    power = 0;
+
+    std::cout << "Set 0 state for the iron turtle controller\n";
+
+    usleep(1000 * 3000);
+    inx = 0;
+    while (inx < 50) {
+        hoverboardApi->sendSpeedData(0.0, current_speed, power, 5, PROTOCOL_SOM_NOACK);
+        current_speed = (current_speed > -0.05) ? (current_speed - 0.001) : -0.05;
+        usleep(1000 * 30);
+        inx++;
+    }
+    std::cout << "DONE: Set 0 state for the iron turtle controller\n";
+    inx = 0;
+    while (inx < 200) {
+        hoverboardApi->sendSpeedData(0.0, -0.05, power, 5, PROTOCOL_SOM_NOACK);
+        power = (power < 200) ? (power + 25) : 200;
+        usleep(1000 * 30);
+        inx++;
+    }
+
+    std::cout << "step 2 passed\n";
+    inx = 0;
+    while (inx < 50) {
+        hoverboardApi->sendSpeedData(0.0, current_speed, power, 5, PROTOCOL_SOM_NOACK);
+        current_speed = (current_speed < 0) ? (current_speed + 0.001) : 0;
+        usleep(1000 * 30);
+        inx++;
+    }
+
 
     close(serialPort);
     return 0;
